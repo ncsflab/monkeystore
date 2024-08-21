@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kkday product backend submit
 // @namespace    https://www.kkday.com/
-// @version      2024-08-18
+// @version      2024-08-20
 // @description  kkday product backend submit
 // @author       You
 // @match        https://www.kkday.com/zh-hk/product/*
@@ -17,9 +17,12 @@ var mock_submit = true;
 // *************************
 var csrf_token = ''; // check and update before running the script
 var product_url = window.location.href; //'https://www.kkday.com/zh-hk/product/185742';
-var pkg_keyword_pattern = /1折|\$1瘋搶/;
+var pkg_keyword_pattern = /1折|\$1瘋搶|一折/;
 var retry_delay = 3_000; //ms
 var date_choices = [
+  '2024-09-28',
+  '2024-09-15',
+
   '2024-09-26',
   '2024-09-30',
   '2024-09-23',
@@ -27,29 +30,69 @@ var date_choices = [
   '2024-09-16',
   '2024-09-09',
   '2024-09-02',
-  '2024-09-06'
+  '2024-09-05'
 ];
 var quantity_choices = {
   'adult': 2,
   'child': 1,
-  'senior': 0,
+  'senior': 1,
   'infant': 0
 };
 
 //---
-
+var runnow = true;
 var csrf_token_msg_logged = false;
-function wait_for_csrf_token() {
-  if (!window.csrf_token) {
-    if (!csrf_token_msg_logged) {
-      console.log('Please configure variable csrf_token.');
-      console.log('e.g. csrf_token = \'9fbb1a9519c8c29792b51f69225f2aa1\';');
-      csrf_token_msg_logged = true;
-    }
-    setTimeout(wait_for_csrf_token, 1000);
+var start_msg_logged = false;
+
+function get_member_status() {
+  var member_url = 'https://www.kkday.com/zh-hk/member/ajax_get_member_status?t=' + Date.now();
+  console.log('Loading member status');
+  $.ajax({
+    method: 'GET',
+    dataType: 'json',
+    url: member_url
+  }).done(function(res, status, xhr) {
+    csrf_token = res.data.csrf_hash;
+    console.log('Fetched csrf token: ' + csrf_token);
+    check_csrf_token();
+  });
+}
+
+function check_csrf_token() {
+  if (csrf_token) {
+    console.log('csrf_token is ' + csrf_token);
+    wait_for_start();
   } else {
-    csrf_token = window.csrf_token;
+    if (!window.csrf_token) {
+      if (!csrf_token_msg_logged) {
+        console.log('Please configure variable csrf_token.');
+        console.log('e.g. csrf_token = \'9fbb1a9519c8c29792b51f69225f2aa1\';');
+        csrf_token_msg_logged = true;
+      }
+      setTimeout(check_csrf_token, 1000);
+    } else {
+      csrf_token = window.csrf_token;
+      check_csrf_token();
+    }
+  }
+}
+
+function wait_for_start() {
+  if (runnow) {
+    console.log('Start run now');
     load_init_data();
+  } else {
+    if (!window.runnow) {
+      if (!start_msg_logged) {
+        console.log('To start the script, use');
+        console.log('> runnow=true');
+        start_msg_logged = true;
+      }
+      setTimeout(wait_for_start, 500);
+    } else {
+      runnow = window.runnow;
+      wait_for_start();
+    }
   }
 }
 
@@ -59,7 +102,7 @@ function load_init_data() {
     method: 'GET',
     dataType: 'html',
     url: product_url
-  }).done(function(html){
+  }).done(function(html) {
     console.log('Parsing product page');
     var lines = html.split(/\r?\n|\r|\n/g);
 
@@ -91,104 +134,129 @@ function load_package_data(prod_mid, from_date, to_date, product_version) {
     dataType:'json',
     url: package_url
   }).done(function(res, status, xhr) {
-    process_package_response(res, product_version);
+    console.log('Package details loaded');
+    process_package_response(res, from_date, to_date, product_version);
   });
 }
 
-function process_package_response(res, product_version) {
-  var packages = res.data.PACKAGE;
+function process_package_response(res, from_date, to_date, product_version) {
+  var packages = Object.values(res.data.PACKAGE);
   var calendars = res.data.CALENDAR;
-  var items = res.data.ITEM;
+  var package_items = res.data.ITEM;
   var product_setting = res.data['PRODUCT-SETTING'];
   var prod_oid = product_setting.prod_oid;
   var prod_mid = product_setting.prod_mid;
 
   console.log('Finding package');
-  var package_found = false;
-  for (const [pkg_key, pkg] of Object.entries(packages)) {
-    if (!package_found) {
-      var pkg_id = pkg.pkg_oid;
-      var pkg_name = pkg.name;
-      if (pkg_name.match(pkg_keyword_pattern) !== null) {
-        console.log('Package found: ' + pkg_name);
-        if (!calendars.available_pkg.includes(pkg_id)) {
-          console.log('No calendar for package, sold out');
-        } else {
-          var available_dates = Object.values(calendars.pkg_calendar).filter(cal => cal.available_pkg.includes(pkg_id)).map(cal => cal.date);
-          //var filtered_items = get_items(items, pkg.items);
-          var item = items[pkg.items[0]];
-          var order_sent = check_package(pkg, available_dates, item, prod_oid, prod_mid, product_version);
-          if (order_sent) {
-            package_found = true;
-          }
-        }
-      }
-    } else {
-      console.log('Order of other package has been sent, skipping package: ' + pkg.name);
-    }
-  }
-  if (!package_found) {
-    if (window.stoprun === true) {
-      console.log('All packages scanned and no matching, stop running');
-    } else {
-      console.log('All packages scanned and no matching, retry in ' + retry_delay + 'ms');
-      setTimeout(load_init_data, retry_delay);
-    }
-  }
+  process_package(packages, 0, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
 }
 
-function get_items(items, item_ids) {
-  return Object.values(items).filter(item => item_ids.includes(item.item_oid));
-}
-
-function check_package(pkg, available_dates, item, prod_oid, prod_mid, product_version) {
+function process_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version) {
+  var pkg = packages[pkg_idx];
+  var pkg_oid = pkg.pkg_oid;
   var pkg_name = pkg.name;
-  if (pkg.is_all_sold_out) {
-    console.log('All sold out = TRUE: ' + pkg_name);
-  } else {
-    console.log('Available dates: ' + available_dates);
-    var matched_dates = date_choices.filter(date_choice => available_dates.includes(date_choice));
-    if (matched_dates.length > 0) {
-      var go_date = matched_dates[0];
-      console.log('Date matched: ' + matched_dates);
-      console.log('Date selected: ' + go_date);
-
-      var quantities = get_quantity_to_book(item);
-      console.log(JSON.stringify(quantities));
-      submit_order(pkg, item, go_date, quantities, prod_oid, prod_mid, product_version);
-
-      /*
-      var wanted_qty = 2;
-      var max_qty = item.unit_quantity_rule.total_rule.max_quantity;
-      var remain_qty = item.remain_qty;
-      var qty_to_book = Math.min(max_qty, wanted_qty, remain_qty);
-      console.log('Quantity => wanted: ' + wanted_qty + ', max: ' + max_qty + ', remain: ' + remain_qty + ', ACTUAL: ' + qty_to_book);
-      submit_single_order(pkg, item, go_date, qty_to_book, prod_oid, prod_mid, product_version);
-      */
-      return true;
+  if (pkg_name.match(pkg_keyword_pattern) !== null) {
+    console.log('Package found: ' + pkg_name);
+    if (pkg.is_all_sold_out) {
+      console.log('All sold out = TRUE: ' + pkg_name);
+      check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
     } else {
-      console.log('No matched available date');
+      if (!calendars.available_pkg.includes(pkg_oid)) {
+        console.log('No calendar for package, sold out');
+        check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+      } else {
+        load_items_data(packages, pkg_idx, package_items, from_date, to_date, calendars, prod_oid, prod_mid, product_version);
+      }
     }
+  } else {
+    console.log('Skip package: ' + pkg_name);
+    check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
   }
-  return false;
 }
 
-function get_quantity_to_book(item) {
+function check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version) {
+  if (packages.length > pkg_idx + 1) {
+    process_package(packages, pkg_idx + 1, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+  } else {
+    console.log('Finished processing all packages');
+  }
+}
+
+function load_items_data(packages, pkg_idx, package_items, from_date, to_date, calendars, prod_oid, prod_mid, product_version) {
+  var pkg = packages[pkg_idx];
+  var pkg_oid = pkg.pkg_oid;
+  var pkg_item = package_items[pkg.items[0]];
+  var item_oid = pkg_item.item_oid;
+  var items_data_url = 'https://www.kkday.com/zh-hk/product/ajax_get_items_data?pkgOid=' + pkg_oid + '&itemOidList[]=' + item_oid + '&beginDate=' + from_date + '&endDate=' + to_date + '&previewToken=';
+  console.log('Loading item data details: ' + items_data_url);
+  $.ajax({
+    method: 'GET',
+    dataType:'json',
+    url: items_data_url
+  }).done(function(res, status, xhr) {
+    console.log('Item data details loaded');
+    process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, calendars, prod_oid, prod_mid, product_version);
+  });
+}
+
+function process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, calendars, prod_oid, prod_mid, product_version) {
+  var pkg = packages[pkg_idx];
+  var item_data = res.data[pkg_item.item_oid];
+  var item = item_data.item;
+  var calendars = item_data.calendar;
+  var skus_price_calendars = item_data.skusPriceCalendar;
+  
+  console.log('Finding available dates');
+  var available_dates = Object.values(calendars).filter(cal => cal.is_saleable === true && cal.is_sold_out === false).map(cal => cal.date);
+  console.log('Available dates: ' + available_dates);
+  var matched_dates = date_choices.filter(date_choice => available_dates.includes(date_choice));
+  if (matched_dates.length > 0) {
+    var go_date = matched_dates[0];
+    var calendar = calendars[go_date];
+    console.log('Date matched: ' + matched_dates);
+    console.log('Date selected: ' + go_date);
+    console.log('Remain quantity ' + go_date + ': ' + JSON.stringify(calendar.remain_qty));
+
+    var event_name = null;
+    if (item.has_event) {
+      var event_name = null;
+      var available_events = calendar.events;
+      if (calendar.remain_qty != null) {
+        event_name = Object.entries(calendar.remain_qty).filter(([key, val]) => val > 0).map(([key, val]) => key)[0];
+      } else {
+        event_name = available_events[0];
+        //event_name = item.sale_time.earliest_sale_time.event;
+      }
+      console.log('Event selected: ' + event_name + ' (all events: ' + available_events + ')');
+    }
+
+    var quantities = resolve_booking_quantities(item, go_date, skus_price_calendars, event_name);
+    console.log('Quantity to submit: ' + JSON.stringify(quantities));
+    submit_order(pkg, item, go_date, event_name, quantities, prod_oid, prod_mid, product_version);
+  } else {
+    console.log('No matched available date');
+    check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+  }
+}
+
+function resolve_booking_quantities(item, go_date, skus_price_calendars, event_name) {
   var qty = [];
-  var max_qty = item.unit_quantity_rule.total_rule.max_quantity;
-  var min_qty = item.unit_quantity_rule.total_rule.min_quantity;
+  var max_qty = item.unit_quantity_rule.total_rule.max_quantity || Number.MAX_SAFE_INTEGER;
+  var min_qty = item.unit_quantity_rule.total_rule.min_quantity || 0;
   var remain_qty = item.remain_qty || Number.MAX_SAFE_INTEGER;
 
   var total_wanted_qty = Object.values(quantity_choices).reduce((a,b) => a+b, 0);
   var skus = item.skus;
   var specs = item.specs;
+  
   if (specs[0].spec_oid == 'spec-single') {
     var sku = skus[0];
-    var price = sku.single_price.fullday;
     var sku_oid = sku.sku_oid;
     var spec_item_oid = sku.spec['spec-single'];
     var final_qty = Math.max(min_qty, Math.min(max_qty, total_wanted_qty, remain_qty));
-    console.log('Quantity => wanted: ' + total_wanted_qty + ', min: ' + min_qty + ', max: ' + max_qty + ', remain: ' + (remain_qty == Number.MAX_SAFE_INTEGER ? 'unlimited' : remain_qty) + ', FIANL: ' + final_qty);
+    console.log('Quantity => wanted: ' + total_wanted_qty + ', min: ' + min_qty + ', max: ' + (max_qty == Number.MAX_SAFE_INTEGER ? '--' : max_qty) + ', remain: ' + (remain_qty == Number.MAX_SAFE_INTEGER ? '--' : remain_qty) + ', FIANL: ' + final_qty);
+    var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
+    console.log('Price => ' + price);
     qty.push({
       quantity: final_qty,
       price: price,
@@ -199,6 +267,7 @@ function get_quantity_to_book(item) {
     var spec_items = item.specs.filter(spec => spec.spec_oid == 'spec-ticket')[0].spec_items;
     var has_child = spec_items.filter(spec_item => spec_item.spec_item_oid == 'child').length > 0;
     var has_senior = spec_items.filter(spec_item => spec_item.spec_item_oid == 'senior').length > 0;
+    
     if (!has_senior) {
       quantity_choices.adult += quantity_choices.senior;
       quantity_choices.senior = 0;
@@ -209,7 +278,7 @@ function get_quantity_to_book(item) {
       quantity_choices.child = 0;
       console.log('No child, grouping senior to adult: ' + JSON.stringify(quantity_choices));
     }
-
+    
     var accumulated_qty = 0;
     Object.keys(quantity_choices).filter(type => quantity_choices[type] > 0).forEach(type => {
       var matched_rulesets = item.unit_quantity_rule.ticket_rule.rulesets.filter(ruleset => ruleset.spec_items.includes(type));
@@ -224,21 +293,18 @@ function get_quantity_to_book(item) {
       var filtered_skus = skus.filter(sku => sku.spec['spec-ticket'] == type);
       if (filtered_skus.length > 0) {
         var sku = filtered_skus[0];
+        var sku_oid = sku.sku_oid;
         var wanted_qty = quantity_choices[type];
         var resolved_qty = Math.max(type_min_qty, Math.min(wanted_qty, type_max_qty));
-        console.log('Quantity ' + type + ' => wanted: ' + wanted_qty + ', min: ' + type_min_qty + ', max: ' + type_max_qty + ', resolved: ' + resolved_qty);
-        var price;
-        if (sku.single_price && sku.single_price.fullday) {
-          price = sku.single_price.fullday;
-        } else {
-          price = item.sale_price.min_price;
-        }
+        console.log('Quantity ' + type + ' => wanted: ' + wanted_qty + ', min: ' + type_min_qty + ', max: ' + (type_max_qty == Number.MAX_SAFE_INTEGER ? '--' : type_max_qty) + ', resolved: ' + resolved_qty);
+        var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
+        console.log('Price ' + type + ' => ' + price);
 
         if (accumulated_qty + resolved_qty <= max_qty) {
           qty.push({
             quantity: resolved_qty,
             price: price,
-            sku_oid: sku.sku_oid,
+            sku_oid: sku_oid,
             spec_item_oid: type
           });
         } else {
@@ -247,7 +313,7 @@ function get_quantity_to_book(item) {
           qty.push({
             quantity: reduced_qty,
             price: price,
-            sku_oid: sku.sku_oid,
+            sku_oid: sku_oid,
             spec_item_oid: type
           });
         }
@@ -255,6 +321,22 @@ function get_quantity_to_book(item) {
     });
   }
   return qty;
+}
+
+function resolve_price(item, sku, skus_price_calendars, go_date, event_name) {
+  if (sku.single_price && sku.single_price.fullday) {
+    return sku.single_price.fullday;
+  } else {
+    var sku_oid = sku.sku_oid;
+    var price_obj = skus_price_calendars[sku_oid][go_date].price;
+    if (price_obj.fullday) {
+      return price_obj.fullday;
+    } else if (item.has_event && price_obj[event_name]) {
+      return price_obj[event_name];
+    } else {
+      return item.sale_price.min_price;
+    }
+  }
 }
 
 function process_direct_purchase_response(res) {
@@ -267,7 +349,7 @@ function process_direct_purchase_response(res) {
   }
 }
 
-function submit_order(pkg, item, go_date, quantities, prod_oid, prod_mid, product_version) {
+function submit_order(pkg, item, go_date, event_name, quantities, prod_oid, prod_mid, product_version) {
   var purchase_url = 'https://www.kkday.com/zh-hk/booking/ajax_direct_purchase';
   var pkg_oid = pkg.pkg_oid;
   var item_oid = item.item_oid;
@@ -276,9 +358,8 @@ function submit_order(pkg, item, go_date, quantities, prod_oid, prod_mid, produc
   var single_choice_spec = null;
   var multi_choice_spec = null;
   var generated_id = null;
-  var event_name = null;
 
-  if (item.skus.length == 1) {
+  if (item.specs[0].spec_oid == 'spec-single') {
     var qty = quantities[0];
     generated_id = prod_oid + '_' + item_oid + '_' + go_date + '_' + qty.spec_item_oid;
     single_choice_spec = {
@@ -311,7 +392,6 @@ function submit_order(pkg, item, go_date, quantities, prod_oid, prod_mid, produc
   }
 
   if (item.has_event) {
-    event_name = item.sale_time.earliest_sale_time.event;
     generated_id += '_' + event_name;
   }
 
@@ -487,4 +567,4 @@ csrf_token_name: csrf_token
   }
 }
 
-wait_for_csrf_token();
+get_member_status();
