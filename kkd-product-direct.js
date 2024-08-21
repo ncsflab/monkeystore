@@ -1,28 +1,27 @@
 // ==UserScript==
 // @name         kkday product backend submit
 // @namespace    https://www.kkday.com/
-// @version      2024-08-20
+// @version      2024-08-21
 // @description  kkday product backend submit
 // @author       You
-// @match        https://www.kkday.com/zh-hk/product/*
+// @match        https://www.kkday.com/zh-hk/product/137849
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=kkday.com
 // @require      https://code.jquery.com/jquery-3.7.1.min.js
 // @grant        none
+// @noframes
 // ==/UserScript==
 
 var $ = jQuery.noConflict(true);
 
 // *************************
 var mock_submit = true;
+var runnow = true;
 // *************************
 var csrf_token = ''; // check and update before running the script
 var product_url = window.location.href; //'https://www.kkday.com/zh-hk/product/185742';
-var pkg_keyword_pattern = /1折|\$1瘋搶|一折/;
+var pkg_keyword_pattern = /1折|一折|\$1瘋搶/;
 var retry_delay = 3_000; //ms
 var date_choices = [
-  '2024-09-28',
-  '2024-09-15',
-
   '2024-09-26',
   '2024-09-30',
   '2024-09-23',
@@ -38,15 +37,19 @@ var quantity_choices = {
   'senior': 1,
   'infant': 0
 };
+var event_prefs = [
+  '18:15',
+  '18:00',
+  '18:30'
+];
 
 //---
-var runnow = true;
 var csrf_token_msg_logged = false;
 var start_msg_logged = false;
 
 function get_member_status() {
   var member_url = 'https://www.kkday.com/zh-hk/member/ajax_get_member_status?t=' + Date.now();
-  console.log('Loading member status');
+  console.log('Loading member status: ' + member_url);
   $.ajax({
     method: 'GET',
     dataType: 'json',
@@ -165,7 +168,7 @@ function process_package(packages, pkg_idx, package_items, calendars, prod_oid, 
         console.log('No calendar for package, sold out');
         check_next_package(packages, pkg_idx, package_items, calendars, prod_oid, prod_mid, from_date, to_date, product_version);
       } else {
-        load_items_data(packages, pkg_idx, package_items, from_date, to_date, calendars, prod_oid, prod_mid, product_version);
+        load_items_data(packages, pkg_idx, package_items, from_date, to_date, prod_oid, prod_mid, product_version);
       }
     }
   } else {
@@ -182,7 +185,7 @@ function check_next_package(packages, pkg_idx, package_items, calendars, prod_oi
   }
 }
 
-function load_items_data(packages, pkg_idx, package_items, from_date, to_date, calendars, prod_oid, prod_mid, product_version) {
+function load_items_data(packages, pkg_idx, package_items, from_date, to_date, prod_oid, prod_mid, product_version) {
   var pkg = packages[pkg_idx];
   var pkg_oid = pkg.pkg_oid;
   var pkg_item = package_items[pkg.items[0]];
@@ -195,17 +198,17 @@ function load_items_data(packages, pkg_idx, package_items, from_date, to_date, c
     url: items_data_url
   }).done(function(res, status, xhr) {
     console.log('Item data details loaded');
-    process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, calendars, prod_oid, prod_mid, product_version);
+    process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version);
   });
 }
 
-function process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, calendars, prod_oid, prod_mid, product_version) {
+function process_items_data_response(res, packages, pkg_idx, package_items, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version) {
   var pkg = packages[pkg_idx];
   var item_data = res.data[pkg_item.item_oid];
   var item = item_data.item;
   var calendars = item_data.calendar;
   var skus_price_calendars = item_data.skusPriceCalendar;
-  
+
   console.log('Finding available dates');
   var available_dates = Object.values(calendars).filter(cal => cal.is_saleable === true && cal.is_sold_out === false).map(cal => cal.date);
   console.log('Available dates: ' + available_dates);
@@ -219,13 +222,15 @@ function process_items_data_response(res, packages, pkg_idx, package_items, pkg_
 
     var event_name = null;
     if (item.has_event) {
-      var event_name = null;
       var available_events = calendar.events;
       if (calendar.remain_qty != null) {
-        event_name = Object.entries(calendar.remain_qty).filter(([key, val]) => val > 0).map(([key, val]) => key)[0];
+        available_events = Object.entries(calendar.remain_qty).filter(([key, val]) => val > 0).map(([key, val]) => key);
+      }
+      var filtered_events = event_prefs.filter(ev => available_events.includes(ev));
+      if (filtered_events.length > 0) {
+        event_name = filtered_events[0];
       } else {
-        event_name = available_events[0];
-        //event_name = item.sale_time.earliest_sale_time.event;
+        event_name = item.sale_time.earliest_sale_time.event;
       }
       console.log('Event selected: ' + event_name + ' (all events: ' + available_events + ')');
     }
@@ -248,7 +253,7 @@ function resolve_booking_quantities(item, go_date, skus_price_calendars, event_n
   var total_wanted_qty = Object.values(quantity_choices).reduce((a,b) => a+b, 0);
   var skus = item.skus;
   var specs = item.specs;
-  
+
   if (specs[0].spec_oid == 'spec-single') {
     var sku = skus[0];
     var sku_oid = sku.sku_oid;
@@ -267,7 +272,7 @@ function resolve_booking_quantities(item, go_date, skus_price_calendars, event_n
     var spec_items = item.specs.filter(spec => spec.spec_oid == 'spec-ticket')[0].spec_items;
     var has_child = spec_items.filter(spec_item => spec_item.spec_item_oid == 'child').length > 0;
     var has_senior = spec_items.filter(spec_item => spec_item.spec_item_oid == 'senior').length > 0;
-    
+
     if (!has_senior) {
       quantity_choices.adult += quantity_choices.senior;
       quantity_choices.senior = 0;
@@ -278,7 +283,7 @@ function resolve_booking_quantities(item, go_date, skus_price_calendars, event_n
       quantity_choices.child = 0;
       console.log('No child, grouping senior to adult: ' + JSON.stringify(quantity_choices));
     }
-    
+
     var accumulated_qty = 0;
     Object.keys(quantity_choices).filter(type => quantity_choices[type] > 0).forEach(type => {
       var matched_rulesets = item.unit_quantity_rule.ticket_rule.rulesets.filter(ruleset => ruleset.spec_items.includes(type));
@@ -336,16 +341,6 @@ function resolve_price(item, sku, skus_price_calendars, go_date, event_name) {
     } else {
       return item.sale_price.min_price;
     }
-  }
-}
-
-function process_direct_purchase_response(res) {
-  if (res.isSuccess) {
-    var redirect_url = res.data.redirect;
-    console.log('Success for creating direct purchase, redirecting to ' + redirect_url);
-    window.location.href = redirect_url;
-  } else {
-    console.log('Direct purchase not success: ' + JSON.stringify(res));
   }
 }
 
@@ -456,7 +451,8 @@ items: [
 ],
 csrf_token_name: csrf_token
 };
-  console.log(JSON.stringify(data));
+
+  log_as_form_data(data);
   if (!mock_submit) {
     console.log('Submitting order');
     $.ajax({
@@ -470,101 +466,113 @@ csrf_token_name: csrf_token
   }
 }
 
-function submit_sinlge_order(pkg, item, go_date, qty, prod_oid, prod_mid, product_version) {
-  var purchase_url = 'https://www.kkday.com/zh-hk/booking/ajax_direct_purchase';
-  var pkg_oid = pkg.pkg_oid;
-  var item_oid = item.item_oid;
-  var single_choice_spec = item.specs[0].spec_items[0].spec_item_oid;
-
-  var sku = item.skus[0];
-  var skus_sku_oid = sku.sku_oid;
-  var skus_spec_single = sku.spec['spec-single'];
-  var single_price = sku.single_price.fullday;
-
-  var total_price = single_price * qty;
-  var generated_id = prod_oid + '_' + item_oid + '_' + go_date + '_' + skus_spec_single;
-
-  var data = {
-isCartBooking: false,
-isPriorityBooking: false,
-items: [
-  {
-    prodOid: prod_oid,
-    prodMid: prod_mid,
-    productVersion: product_version,
-    pkgOid: pkg_oid,
-    itemOid: item_oid,
-    isZeroPrice: false,
-    goDate: go_date,
-    backDate: null,
-    event: null,
-    singleChoiceSpecs: {
-      'spec-single': single_choice_spec
-    },
-    multiChoiceSpecAmount: null,
-    skus: [
-      {
-        skuOid: skus_sku_oid,
-        amount: qty,
-        price: single_price,
-        spec: {
-          'spec-single': skus_spec_single
-        }
-      }
-    ],
-    amountTotal: qty,
-    priceTotal: total_price,
-    isMarketplace: false,
-    supplierName: null,
-    supplierLogo: null,
-    cancelPolicy: {
-      module_title: '取消政策',
-      content: {
-        type: 'properties',
-        title: null,
-        property_keys: {
-          '0':'policy_type',
-          '1':'partial_refund'
-        },
-        properties: {
-          policy_type: {
-            type: 'content',
-            desc: '商品一經訂購完成後，即不可取消、更改訂單，亦不得請求退款',
-            use_global: false,
-            use_html: false,
-            title: '手續費收取方式'
-          },
-          partial_refund: null
-        }
-      }
-    },
-    refundPolicy: {
-      policy_type: 2,
-      refund_type: 1,
-      refund_deadline: null
-    },
-    verticalInfo: {
-      vertical: 'DEFAULT'
-    },
-    id: generated_id,
-    isOpenDateProduct: false,
-    confirmHours: 0
-  }
-],
-csrf_token_name: csrf_token
-};
-  console.log(JSON.stringify(data));
-  if (!mock_submit) {
-    console.log('Submitting order');
-    $.ajax({
-      method: 'POST',
-      dataType: 'json',
-      url: purchase_url,
-      data: data
-    }).done(process_direct_purchase_response);
+function process_direct_purchase_response(res) {
+  if (res.isSuccess) {
+    var redirect_url = res.data.redirect;
+    console.log('Success for creating direct purchase, redirecting to ' + redirect_url);
+    window.location.href = redirect_url;
   } else {
-    console.log('Mock submit order');
+    console.log('Direct purchase not success: ' + JSON.stringify(res));
   }
+}
+
+function log_as_form_data(data) {
+  var form_data = convert_json_to_formdata(data);
+  for (let [key, val] of form_data.entries()) {
+    console.log(key + '="' + val + '"');
+  }
+  //console.log(JSON.stringify(data));
+}
+
+function mergeObjects(object1, object2) {
+  return [object1, object2].reduce(function (carry, objectToMerge) {
+    Object.keys(objectToMerge).forEach(function (objectKey) {
+      carry[objectKey] = objectToMerge[objectKey];
+    });
+    return carry;
+  }, {});
+}
+
+function isArray(val) {
+  return ({}).toString.call(val) === '[object Array]';
+}
+
+function isJsonObject(val) {
+  return !isArray(val) && typeof val === 'object' && !!val && !(val instanceof Blob) && !(val instanceof Date);
+}
+
+function isAppendFunctionPresent(formData) {
+  return typeof formData.append === 'function';
+}
+
+function isGlobalFormDataPresent() {
+  return typeof FormData === 'function';
+}
+
+function getDefaultFormData() {
+  if (isGlobalFormDataPresent()) {
+    return new FormData();
+  }
+}
+
+function convert_json_to_formdata(jsonObject, options) {
+  if (options && options.initialFormData) {
+    if (!isAppendFunctionPresent(options.initialFormData)) {
+      throw 'initialFormData must have an append function.';
+    }
+  } else if (!isGlobalFormDataPresent()) {
+    throw 'This environment does not have global form data. options.initialFormData must be specified.';
+  }
+  var defaultOptions = {
+    initialFormData: getDefaultFormData(),
+    showLeafArrayIndexes: true,
+    includeNullValues: true,
+    mapping: function(value) {
+      if (typeof value === 'boolean') {
+          return +value ? 'true': 'false';
+      } 
+      return value;
+    }
+  };
+  var mergedOptions = mergeObjects(defaultOptions, options || {});
+  return convertRecursively(jsonObject, mergedOptions, mergedOptions.initialFormData);
+}
+
+function convertRecursively(jsonObject, options, formData, parentKey) {
+  var index = 0;
+  for (var key in jsonObject) {
+    if (jsonObject.hasOwnProperty(key)) {
+      var propName = parentKey || key;
+      var value = options.mapping(jsonObject[key]);
+      if (parentKey && isJsonObject(jsonObject)) {
+        propName = parentKey + '[' + key + ']';
+      }
+      if (parentKey && isArray(jsonObject)) {
+        if (isArray(value) || options.showLeafArrayIndexes) {
+          propName = parentKey + '[' + index + ']';
+        } else {
+          propName = parentKey + '[]';
+        }
+      }
+      if (isArray(value) || isJsonObject(value)) {
+        convertRecursively(value, options, formData, propName);
+      } else if (value instanceof FileList) {
+        for (var j = 0; j < value.length; j++) {
+          formData.append(propName + '[' + j + ']', value.item(j));
+        }
+      } else if (value instanceof Blob) {
+        formData.append(propName, value, value.name);
+      } else if (value instanceof Date) {
+        formData.append(propName, value.toISOString());
+      } else if ((value === null && options.includeNullValues) && value !== undefined) {
+        formData.append(propName, "");
+      } else if (value !== null && value !== undefined) {
+        formData.append(propName, value);
+      }
+    }
+    index++;
+  }
+  return formData;
 }
 
 get_member_status();
