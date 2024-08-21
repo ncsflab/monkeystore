@@ -4,7 +4,7 @@
 // @version      2024-08-21
 // @description  kkday product backend submit
 // @author       You
-// @match        https://www.kkday.com/zh-hk/product/137849
+// @match        https://www.kkday.com/zh-hk/product/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=kkday.com
 // @require      https://code.jquery.com/jquery-3.7.1.min.js
 // @grant        none
