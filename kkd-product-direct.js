@@ -355,11 +355,10 @@ function resolve_booking_quantities_spec_multi(item, min_qty, max_qty, remain_qt
       var matched_spec = matched_specs[0];
       var spec_item_prefs = spec_prefs[matched_spec.spec_title]
       var matched_spec_items = matched_spec.spec_items.filter(spec_item => spec_item_prefs.includes(spec_item.name));
+      var selected_spec_item_oid = matched_spec.spec_items[0].spec_item_oid; // choose default (first) spec item
+
       if (matched_spec_items.length > 0) {
         selected_spec_item_oid = matched_spec_items[0].spec_item_oid;
-      } else {
-        // choose default (first) spec item
-        selected_spec_item_oid = matched_spec.spec_items[0].spec_item_oid
       }
       selected_specs.push({
         spec_oid: matched_spec.spec_oid,
@@ -445,6 +444,7 @@ function submit_order(pkg, item, has_date, go_date, event_name, quantities, prod
   var refund_policy_policy_type = pkg.refund_policy.policy_type;
   var refund_policy_refund_type = pkg.refund_policy.refund_type;
 
+  var qty;
   var order_skus = [];
   var single_choice_spec = null;
   var multi_choice_spec = null;
@@ -455,7 +455,7 @@ function submit_order(pkg, item, has_date, go_date, event_name, quantities, prod
   }
 
   if (item.specs[0].spec_oid == 'spec-single') {
-    var qty = quantities[0];
+    qty = quantities[0];
     var spec_item_oid = qty.specs['spec-single'];
     generated_id += '_' + spec_item_oid;
     single_choice_spec = {
@@ -485,7 +485,7 @@ function submit_order(pkg, item, has_date, go_date, event_name, quantities, prod
     });
   } else {
     single_choice_spec = {};
-    var qty = quantities[0];
+    qty = quantities[0];
     Object.entries(qty.specs).forEach(([spec_oid, spec_item_oid]) => {
       single_choice_spec[spec_oid] = spec_item_oid;
       generated_id += '_' + spec_item_oid;
