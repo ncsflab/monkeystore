@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kkday product backend submit
 // @namespace    https://www.kkday.com/
-// @version      2024-08-22
+// @version      2024-08-23
 // @description  kkday product backend submit
 // @author       You
 // @match        https://www.kkday.com/zh-hk/product/*
@@ -17,21 +17,15 @@ var $ = jQuery.noConflict(true);
 var mock_submit = true;
 var runnow = true;
 // *************************
-var csrf_token = ''; // check and update before running the script
-var csrf_token_name = 'csrf_token_name';
-var product_url = window.location.href; //'https://www.kkday.com/zh-hk/product/185742';
+
 var pkg_keyword_pattern = /1折|一折|\$1瘋搶/;
 var retry_delay = -1; //ms
 var date_choices = [
-  '2024-08-29',
-  '2024-09-02',
-  '2024-09-06',
-  '2024-09-03',
-  '2024-09-05',
-  '2024-09-16',
-  '2024-09-19',
-  '2024-09-30',
-  '2024-09-27'
+  '2024-09-15',
+  '2024-09-22',
+  '2024-09-29',
+  '2024-09-12',
+  '2024-08-31'
 ];
 var num_of_room_choice = 2;
 var quantity_choices = {
@@ -41,11 +35,29 @@ var quantity_choices = {
   'infant': 0
 };
 var event_prefs = [
+  '12:00',
+  '20:30',
+  '20:00',
+  '19:30',
   '18:00',
   '18:15',
   '18:30'
 ];
 var spec_prefs = {
+  '用餐時間':[
+    '18:00 - 20:00',
+    '20:30 - 22:30'
+  ],
+  '體驗分店':[
+    'The Southside',
+    '山頂廣場店'
+  ],
+  '體驗時間':[
+    '15:00'
+  ],
+  '用餐位置':[
+    '室內用餐'
+  ],
   '方案': [
     '1間2晚'
   ],
@@ -69,6 +81,9 @@ var spec_prefs = {
 };
 
 //---
+var csrf_token = ''; // auto detect
+var product_url = window.location.href; // auto detect
+var csrf_token_name = 'csrf_token_name';
 var start_msg_logged = false;
 
 function start_main() {
@@ -228,7 +243,7 @@ function process_items_data_response(res, packages, pkg_idx, package_items, pack
     var calendar = item_data_calendars[go_date];
     console.log('Date matched: ' + matched_dates);
     console.log('Date selected: ' + go_date);
-    console.log('Remain quantity ' + go_date + ': ' + (calendar.remain_qty ? JSON.stringify(calendar.remain_qty) : '--'));
+    console.log('Remain quantity of ' + go_date + ': ' + (calendar.remain_qty ? JSON.stringify(calendar.remain_qty) : '--'));
 
     var event_name = null;
     if (item.has_event) {
@@ -245,14 +260,14 @@ function process_items_data_response(res, packages, pkg_idx, package_items, pack
       console.log('Event selected: ' + event_name + ' (all events: ' + available_events + ')');
     }
 
-    var quantities = resolve_booking_quantities(item, go_date, skus_price_calendars, event_name);
-    if (quantities.length == 0) {
-      console.log('Failed to resolve booking quantities');
+    var orders = resolve_booking_orders(item, go_date, skus_price_calendars, event_name);
+    if (orders.length == 0) {
+      console.log('Failed to resolve booking orders');
     } else {
-      console.log('Quantity to submit: ' + JSON.stringify(quantities));
+      console.log('Orders to submit: ' + JSON.stringify(orders));
       //var has_date = (skus_price_calendars != null);
       var has_date = true;
-      submit_order(pkg, item, has_date, go_date, event_name, quantities, prod_oid, prod_mid, product_version);
+      submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid, prod_mid, product_version);
     }
   } else {
     console.log('No matched available date');
@@ -260,165 +275,159 @@ function process_items_data_response(res, packages, pkg_idx, package_items, pack
   }
 }
 
-function resolve_booking_quantities_spec_single(item, min_qty, max_qty, remain_qty, skus_price_calendars, go_date, event_name) {
-  var skus = item.skus;
-  var sku = skus[0];
-  var sku_oid = sku.sku_oid;
-  var total_wanted_qty = Object.values(quantity_choices).reduce((a,b) => a+b, 0);
-  var qty_upper_bound = [total_wanted_qty, max_qty];
-  if (remain_qty) {
-    qty_upper_bound.push(remain_qty);
-  }
-  var final_qty = Math.max(min_qty, Math.min(...qty_upper_bound));
-  console.log('Quantity => wanted: ' + total_wanted_qty + ', min: ' + min_qty + ', max: ' + (max_qty == Number.MAX_SAFE_INTEGER ? '--' : max_qty) + ', remain: ' + (remain_qty == Number.MAX_SAFE_INTEGER ? '--' : remain_qty) + ', FIANL: ' + final_qty);
-  var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
-  console.log('Price => ' + price);
-  
-  return [{
-    quantity: final_qty,
-    price: price,
-    sku_oid: sku_oid,
-    specs: sku.spec
-  }];
-}
+function resolve_booking_orders(item, go_date, skus_price_calendars, event_name) {
+  var orders = [];
+  var total_max_qty = item.unit_quantity_rule.total_rule.max_quantity || Number.MAX_SAFE_INTEGER;
+  var total_min_qty = item.unit_quantity_rule.total_rule.min_quantity || 0;
+  var total_remain_qty = item.remain_qty || Number.MAX_SAFE_INTEGER;
 
-function resolve_booking_quantities_spec_ticket(item, spec_tickets, max_qty, skus_price_calendars, go_date, event_name) {
-  var qty = [];
-  var skus = item.skus;
-  var spec_ticket_items = spec_tickets[0].spec_items;
-  var has_child = spec_ticket_items.filter(spec_item => spec_item.spec_item_oid == 'child').length > 0;
-  var has_senior = spec_ticket_items.filter(spec_item => spec_item.spec_item_oid == 'senior').length > 0;
-  if (!has_senior) {
-    quantity_choices.adult += quantity_choices.senior;
-    quantity_choices.senior = 0;
-    console.log('No senior, grouping senior to adult: ' + JSON.stringify(quantity_choices));
-  }
-  if (!has_child) {
-    quantity_choices.adult += quantity_choices.child;
-    quantity_choices.child = 0;
-    console.log('No child, grouping senior to adult: ' + JSON.stringify(quantity_choices));
-  }
+  var filtered_specs = filter_specs(item);
+  console.log('filtered_specs = ' + JSON.stringify(filtered_specs));
+  var filtered_skus = filter_skus(item, filtered_specs);
+  console.log('filtered_skus = ' + JSON.stringify(filtered_skus));
 
   var accumulated_qty = 0;
-  Object.keys(quantity_choices).filter(type => quantity_choices[type] > 0).forEach(type => {
-    var matched_rulesets = item.unit_quantity_rule.ticket_rule.rulesets.filter(ruleset => ruleset.spec_items.includes(type));
-    var type_min_qty = 0;
-    var type_max_qty = Number.MAX_SAFE_INTEGER;
-    if (matched_rulesets.length > 0) {
-      var ruleset = matched_rulesets[0];
-      type_min_qty = ruleset.min_quantity || 0;
-      type_max_qty = ruleset.max_quantity || Number.MAX_SAFE_INTEGER;
-    }
-
-    var filtered_skus = skus.filter(sku => sku.spec['spec-ticket'] == type);
-    if (filtered_skus.length > 0) {
-      var sku = filtered_skus[0];
-      var sku_oid = sku.sku_oid;
-      var wanted_qty = quantity_choices[type];
-      var resolved_qty = Math.max(type_min_qty, Math.min(wanted_qty, type_max_qty));
-      console.log('Quantity ' + type + ' => wanted: ' + wanted_qty + ', min: ' + type_min_qty + ', max: ' + (type_max_qty == Number.MAX_SAFE_INTEGER ? '--' : type_max_qty) + ', resolved: ' + resolved_qty);
-      var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
-      console.log('Price ' + type + ' => ' + price);
-
-      if (accumulated_qty + resolved_qty <= max_qty) {
-        qty.push({
-          quantity: resolved_qty,
-          price: price,
-          sku_oid: sku_oid,
-          specs: sku.spec
-        });
-      } else {
-        var reduced_qty = max_qty - accumulated_qty;
-        console.log('Exceeding total maximum ' + max_qty + ', reducing ' + type + ' to ' + reduced_qty);
-        qty.push({
-          quantity: reduced_qty,
-          price: price,
-          sku_oid: sku_oid,
-          specs: sku.spec
-        });
-      }
-    }
-  });
-  return qty;
-}
-
-function resolve_booking_quantities_spec_multi(item, min_qty, max_qty, remain_qty, skus_price_calendars, go_date, event_name) {
-  var qty = [];
-  var selected_specs = [];
-  var skus = item.skus;
-  var specs = item.specs;
-  var spec_pref_titles = Object.keys(spec_prefs);
-
-  spec_pref_titles.forEach(spec_pref_title => {
-    var matched_specs = specs.filter(spec => spec.spec_title == spec_pref_title);
-    if (matched_specs.length > 0) {
-      var matched_spec = matched_specs[0];
-      var spec_item_prefs = spec_prefs[matched_spec.spec_title]
-      var matched_spec_items = matched_spec.spec_items.filter(spec_item => spec_item_prefs.includes(spec_item.name));
-      var selected_spec_item_oid = matched_spec.spec_items[0].spec_item_oid; // choose default (first) spec item
-
-      if (matched_spec_items.length > 0) {
-        selected_spec_item_oid = matched_spec_items[0].spec_item_oid;
-      }
-      selected_specs.push({
-        spec_oid: matched_spec.spec_oid,
-        spec_item_oid: selected_spec_item_oid
-      });
-    }          
-  });
-
-  var filtered_skus = skus;
-  selected_specs.forEach(selected_spec => {
-    filtered_skus = filtered_skus.filter(sku => sku.spec[selected_spec.spec_oid] && sku.spec[selected_spec.spec_oid] == selected_spec.spec_item_oid);
-  });
-  
-  if (filtered_skus.length > 0) {
-    var sku = filtered_skus[0];
-    var sku_oid = sku.sku_oid;
-
-    Object.entries(sku.spec).forEach(([spec_oid, spec_item_oid]) => {
-      var spec = specs.filter(spec => spec.spec_oid == spec_oid)[0];
-      var spec_item = spec.spec_items.filter(spec_item => spec_item.spec_item_oid == spec_item_oid)[0];
-      console.log('Selected option: ' + spec.spec_title + '=' + spec_item.name);
-    });
-
-    var wanted_qty = num_of_room_choice;
-    var qty_upper_bound = [wanted_qty, max_qty];
-    if (remain_qty) {
-      qty_upper_bound.push(remain_qty);
-    }
-    var final_qty = Math.max(min_qty, Math.min(...qty_upper_bound));
-    console.log('Quantity => wanted: ' + wanted_qty + ', min: ' + min_qty + ', max: ' + (max_qty == Number.MAX_SAFE_INTEGER ? '--' : max_qty) + ', FINAL: ' + final_qty);
+  filtered_skus.forEach(sku => {
     var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
-    console.log('Price => ' + price);
 
-    qty.push({
-      quantity: final_qty,
+    var resolved_qty = resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty);
+    accumulated_qty += resolved_qty;
+
+    orders.push({
+      quantity: resolved_qty,
       price: price,
-      sku_oid: sku_oid,
-      specs: sku.spec
+      sku_oid: sku.sku_oid,
+      spec: sku.spec
     });
+  });
+
+  if (orders.length > 0 && accumulated_qty < total_min_qty) {
+    orders[0].quantity += (total_min_qty - accumulated_qty);
+    console.log('Not reaching total minimum ' + total_min_qty + ', increasing quantity of choices: ' + JSON.stringify(orders));
   }
-  return qty;
+
+  return orders;
 }
 
-function resolve_booking_quantities(item, go_date, skus_price_calendars, event_name) {
-  var qty = [];
-  var max_qty = item.unit_quantity_rule.total_rule.max_quantity || Number.MAX_SAFE_INTEGER;
-  var min_qty = item.unit_quantity_rule.total_rule.min_quantity || 0;
-  var remain_qty = item.remain_qty || Number.MAX_SAFE_INTEGER;
+function resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty) {
+  var spec_min_qty = 0;
+  var spec_max_qty = Number.MAX_SAFE_INTEGER;
+
+  var sku_spec_item_oids = Object.values(sku.spec);
+  var ticket_rule = item.unit_quantity_rule.ticket_rule;
+  if (ticket_rule.is_active === true) {
+    var rulesets = item.unit_quantity_rule.ticket_rule.rulesets;
+    var matched_rulesets = rulesets.filter(ruleset => ruleset.spec_items.filter(spec_item_oid => sku_spec_item_oids.includes(spec_item_oid)).length > 0);
+    if (matched_rulesets.length > 0) {
+      for (let i in matched_rulesets) {
+        var ruleset = matched_rulesets[i];
+        if (ruleset.min_quantity) {
+          spec_min_qty = Math.max(spec_min_qty, ruleset.min_quantity);
+        }
+        if (ruleset.max_quantity) {
+          spec_max_qty = Math.min(spec_max_qty, ruleset.max_quantity);
+        }
+      }
+    }
+  }
+
+  var type = '';
+  var wanted_qty;
+  var matched_spec_item_oids = sku_spec_item_oids.filter(spec_item_oid => quantity_choices.hasOwnProperty(spec_item_oid));
+  if (matched_spec_item_oids.length > 0) {
+    var matched_spec_item_oid = matched_spec_item_oids[0];
+    wanted_qty = quantity_choices[matched_spec_item_oid];
+    type = matched_spec_item_oid;
+  } else if (item.unit == '05') {
+    wanted_qty = num_of_room_choice;
+    type = "room";
+  } else {
+    wanted_qty = Object.values(quantity_choices).reduce((a,b) => a+b, 0);
+  }
+
+  var resolved_qty = Math.max(spec_min_qty, Math.min(spec_max_qty, total_max_qty, total_remain_qty, wanted_qty));
+  if (accumulated_qty + resolved_qty > total_max_qty) {
+    resolved_qty = total_max_qty - accumulated_qty;
+  }
+  if (accumulated_qty + resolved_qty > total_remain_qty) {
+    resolved_qty = total_remain_qty - accumulated_qty;
+  }
+  console.log("Quantity " + type + ' => ' +
+    'wanted: ' + wanted_qty + 
+    ', min: ' + spec_min_qty + 
+    ', max: ' + (spec_max_qty == Number.MAX_SAFE_INTEGER ? '--' : spec_max_qty) + 
+    ', total max: ' + (total_max_qty == Number.MAX_SAFE_INTEGER ? '--' : total_max_qty) + 
+    ', total remain: ' + (total_remain_qty == Number.MAX_SAFE_INTEGER ? '--' : total_remain_qty) + 
+    ', before: ' + accumulated_qty +
+    ', after: ' + (accumulated_qty + resolved_qty) + 
+    ', resolved: ' + resolved_qty);
+  return resolved_qty;
+}
+
+function filter_skus(item, selected_specs) {
+  var skus = item.skus;
+  var matched_skus = skus.filter(sku => {
+    var sku_match = true;
+    Object.entries(sku.spec).forEach(([spec_oid, spec_item_oid]) => {
+      if (selected_specs.filter(selected_spec => selected_spec[spec_oid] == spec_item_oid).length == 0) {
+        sku_match = false;
+      }
+    });
+    return sku_match;
+  });
+  return matched_skus;
+}
+
+function filter_specs(item) {
   var specs = item.specs;
+  var selected_specs = [];
 
-  if (specs[0].spec_oid == 'spec-single') {
-    return resolve_booking_quantities_spec_single(item, min_qty, max_qty, remain_qty, skus_price_calendars, go_date, event_name);
-  }
-
-  var spec_tickets = specs.filter(spec => spec.spec_oid == 'spec-ticket');
-  if (spec_tickets.length > 0) {
-    return resolve_booking_quantities_spec_ticket(item, spec_tickets, max_qty, skus_price_calendars, go_date, event_name);
-  }
-
-  return resolve_booking_quantities_spec_multi(item, min_qty, max_qty, remain_qty, skus_price_calendars, go_date, event_name);
+  specs.forEach(spec => {
+    var spec_oid = spec.spec_oid;
+    if (spec_oid == 'spec-single') {
+      var spec_item_oid = spec.spec_items[0].spec_item_oid;
+      selected_specs.push({[spec_oid]: spec_item_oid});
+    } else if (spec_oid == 'spec-ticket') {
+      var spec_items = spec.spec_items;
+      var has_child = spec_items.filter(spec_item => spec_item.spec_item_oid == 'child').length > 0;
+      var has_senior = spec_items.filter(spec_item => spec_item.spec_item_oid == 'senior').length > 0;
+      if (!has_senior) {
+        quantity_choices.adult += quantity_choices.senior;
+        quantity_choices.senior = 0;
+        console.log('No senior, grouping senior to adult: ' + JSON.stringify(quantity_choices));
+      }
+      if (!has_child) {
+        quantity_choices.adult += quantity_choices.child;
+        quantity_choices.child = 0;
+        console.log('No child, grouping senior to adult: ' + JSON.stringify(quantity_choices));
+      }
+      spec_items.filter(spec_item => quantity_choices[spec_item.spec_item_oid] && quantity_choices[spec_item.spec_item_oid] > 0).map(spec_item => {
+        var spec_item_oid = spec_item.spec_item_oid;
+        selected_specs.push({[spec_oid]: spec_item_oid});
+        console.log('Choosing ticket ' + spec_item_oid);
+      });
+    } else {
+      var spec_title = spec.spec_title;
+      var spec_items = spec.spec_items;
+      var spec_pref_titles = Object.keys(spec_prefs);
+      var selected_spec_item = null;
+      if (spec_pref_titles.includes(spec_title)) {
+        var spec_item_names = spec_items.map(spec_item => spec_item.name);
+        var matched_prefs = spec_prefs[spec_title].filter(spec_pref => spec_item_names.includes(spec_pref));
+        if (matched_prefs.length > 0) {
+          selected_spec_item = spec_items.filter(spec_item => spec_item.name == matched_prefs[0])[0];
+          console.log('Choosing option ' + spec_title +  '=' + selected_spec_item.name);
+        }
+      }
+      if (selected_spec_item == null) {
+        selected_spec_item = spec_items[0];
+        console.log('Choosing first default option for ' + spec_title + '=' + selected_spec_item.name);
+      }
+      var spec_item_oid = selected_spec_item.spec_item_oid;
+      selected_specs.push({[spec_oid]: spec_item_oid});
+    }
+  });
+  return selected_specs;
 }
 
 function resolve_price(item, sku, skus_price_calendars, go_date, event_name) {
@@ -437,69 +446,42 @@ function resolve_price(item, sku, skus_price_calendars, go_date, event_name) {
   }
 }
 
-function submit_order(pkg, item, has_date, go_date, event_name, quantities, prod_oid, prod_mid, product_version) {
+function submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid, prod_mid, product_version) {
   var purchase_url = 'https://www.kkday.com/zh-hk/booking/ajax_direct_purchase';
   var pkg_oid = pkg.pkg_oid;
   var item_oid = item.item_oid;
   var refund_policy_policy_type = pkg.refund_policy.policy_type;
   var refund_policy_refund_type = pkg.refund_policy.refund_type;
 
-  var qty;
   var order_skus = [];
-  var single_choice_spec = null;
-  var multi_choice_spec = null;
+  var single_choice_spec = {};
+  var multi_choice_spec = {};
   var generated_id = prod_oid + '_' + item_oid + '_' + go_date;
 
   if (item.has_event) {
     generated_id += '_' + event_name;
   }
 
-  if (item.specs[0].spec_oid == 'spec-single') {
-    qty = quantities[0];
-    var spec_item_oid = qty.specs['spec-single'];
-    generated_id += '_' + spec_item_oid;
-    single_choice_spec = {
-      'spec-single': spec_item_oid
-    };
-    order_skus.push({
-      skuOid: qty.sku_oid,
-      amount: qty.quantity,
-      price: qty.price,
-      spec: {
-        'spec-single': spec_item_oid
+  orders.forEach(order => {
+    Object.entries(order.spec).forEach(([spec_oid, spec_item_oid]) => {
+      if (spec_oid == 'spec-ticket') {
+        multi_choice_spec[spec_item_oid] = order.quantity;
+      } else {
+        generated_id += '_' + spec_item_oid;
+        single_choice_spec[spec_oid] = spec_item_oid;
       }
     });
-  } else if (item.specs.filter(spec => spec.spec_oid == 'spec-ticket').length > 0) {
-    multi_choice_spec = {};
-    quantities.forEach(qty => {
-      var spec_item_oid = qty.specs['spec-ticket'];
-      multi_choice_spec[spec_item_oid] = qty.quantity;
-      order_skus.push({
-        skuOid: qty.sku_oid,
-        amount: qty.quantity,
-        price: qty.price,
-        spec: {
-          'spec-ticket': spec_item_oid
-        }
-      });
-    });
-  } else {
-    single_choice_spec = {};
-    qty = quantities[0];
-    Object.entries(qty.specs).forEach(([spec_oid, spec_item_oid]) => {
-      single_choice_spec[spec_oid] = spec_item_oid;
-      generated_id += '_' + spec_item_oid;
-    });
-    order_skus.push({
-      skuOid: qty.sku_oid,
-      amount: qty.quantity,
-      price: qty.price,
-      spec: single_choice_spec
-    });
-  }
 
-  var total_quantity = quantities.map(qty => qty.quantity).reduce((a,b) => a+b, 0);
-  var total_price = quantities.map(qty => qty.quantity * qty.price).reduce((a,b) => a+b, 0);
+    order_skus.push({
+      skuOid: order.sku_oid,
+      amount: order.quantity,
+      price: order.price,
+      spec: order.spec
+    });
+  });
+
+  var total_quantity = orders.map(order => order.quantity).reduce((a,b) => a+b, 0);
+  var total_price = orders.map(order => order.quantity * order.price).reduce((a,b) => a+b, 0);
 
   var data = {
 isCartBooking: false,
@@ -513,8 +495,8 @@ items: [
     itemOid: item_oid,
     isZeroPrice: false,
     event: event_name,
-    singleChoiceSpecs: single_choice_spec,
-    multiChoiceSpecAmount: multi_choice_spec,
+    singleChoiceSpecs: isEmpty(single_choice_spec) ? null : single_choice_spec,
+    multiChoiceSpecAmount: isEmpty(multi_choice_spec) ? null : multi_choice_spec,
     skus: order_skus,
     amountTotal: total_quantity,
     priceTotal: total_price,
@@ -591,6 +573,10 @@ function process_direct_purchase_response(res) {
   } else {
     console.log('Direct purchase not success: ' + JSON.stringify(res));
   }
+}
+
+function isEmpty(obj) {
+  return obj && Object.keys(obj).length === 0;
 }
 
 function log_as_form_data(data) {
