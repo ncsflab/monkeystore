@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kkday product backend submit
 // @namespace    https://www.kkday.com/
-// @version      2024-08-23
+// @version      2025-06-16
 // @description  kkday product backend submit
 // @author       You
 // @match        https://www.kkday.com/zh-hk/product/*
@@ -11,21 +11,17 @@
 // @noframes
 // ==/UserScript==
 
-var $ = jQuery.noConflict(true);
+//var $ = jQuery.noConflict(true);
 
 // *************************
 var mock_submit = true;
 var runnow = true;
 // *************************
 
-var pkg_keyword_pattern = /1折|一折|\$1瘋搶/;
+var pkg_keyword_pattern = /1折.*晚餐/;
 var retry_delay = -1; //ms
 var date_choices = [
-  '2024-09-15',
-  '2024-09-22',
-  '2024-09-29',
-  '2024-09-12',
-  '2024-08-31'
+  '2025-06-18'
 ];
 var num_of_room_choice = 2;
 var quantity_choices = {
@@ -35,18 +31,20 @@ var quantity_choices = {
   'infant': 0
 };
 var event_prefs = [
-  '12:00',
-  '20:30',
-  '20:00',
-  '19:30',
   '18:00',
-  '18:15',
-  '18:30'
+  '12:00'
 ];
 var spec_prefs = {
   '用餐時間':[
-    '18:00 - 20:00',
-    '20:30 - 22:30'
+    '20:30 - 22:30',
+    '18:00 - 20:00'
+  ],
+  '場次':[
+    '17:30',
+    '16:30'
+  ],
+  '上船點':[
+    '尖沙咀星光大道(近星巴克)'
   ],
   '體驗分店':[
     'The Southside',
@@ -84,6 +82,7 @@ var spec_prefs = {
 var csrf_token = ''; // auto detect
 var product_url = window.location.href; // auto detect
 var csrf_token_name = 'csrf_token_name';
+var start_purchase_time = null;
 var start_msg_logged = false;
 
 function start_main() {
@@ -123,10 +122,13 @@ function load_init_data() {
 
     var product_info = script_state.product.prodInfo;
     var product_version = product_info.version;
+    var go_date_setting_type = product_info.go_date_setting.type
+    var is_open_date_product = go_date_setting_type == '04'; // 04: no date, 01: need to choose date
     var from_date = product_info.sale_time.earliest_sale_time.date;
     var to_date = product_info.sale_time.latest_sale_time.date;
-    csrf_token = script_state.security.CSRFHash;
-    csrf_token_name = script_state.security.CSRFTokenName;
+    csrf_token = script_state.common.member.csrf_hash;
+    csrf_token_name = script_state.common.member.csrf_token_name;
+    start_purchase_time = script_state.product.prodSetting.purchase_date;
     console.log('Using csrf token: ' + csrf_token);
 
     var ga_line = lines.filter(line => line.includes('dataLayer.push'))[0];
@@ -135,11 +137,19 @@ function load_init_data() {
     var ga_obj = JSON.parse(ga_line.substring(from_pos, to_pos));
     var prod_mid = ga_obj.prod_mid;
 
-    load_package_data(prod_mid, from_date, to_date, product_version);
+    if (from_date == null) {
+      from_date = new Date().toISOString().substring(0,10);
+    }
+    if (to_date == null) {
+      var from_date_obj = new Date(from_date);
+      to_date = new Date(from_date_obj.getFullYear(), from_date_obj.getMonth() + 3, 0).toISOString().substring(0, 10);
+    }
+
+    load_package_data(prod_mid, from_date, to_date, product_version, is_open_date_product);
   });
 }
 
-function load_package_data(prod_mid, from_date, to_date, product_version) {
+function load_package_data(prod_mid, from_date, to_date, product_version, is_open_date_product) {
   var package_url = 'https://www.kkday.com/zh-hk/product/ajax_get_packages_data?prodMid=' + prod_mid + '&previewToken=&beginDate=' + from_date + '&endDate=' + to_date;
   console.log('Loading package details: ' + package_url);
   $.ajax({
@@ -148,11 +158,11 @@ function load_package_data(prod_mid, from_date, to_date, product_version) {
     url: package_url
   }).done(function(res, status, xhr) {
     console.log('Package details loaded');
-    process_package_response(res, from_date, to_date, product_version);
+    process_package_response(res, from_date, to_date, product_version, is_open_date_product);
   });
 }
 
-function process_package_response(res, from_date, to_date, product_version) {
+function process_package_response(res, from_date, to_date, product_version, is_open_date_product) {
   var packages = Object.values(res.data.PACKAGE);
   var package_calendars = res.data.CALENDAR;
   var package_items = res.data.ITEM;
@@ -161,10 +171,10 @@ function process_package_response(res, from_date, to_date, product_version) {
   var prod_mid = product_setting.prod_mid;
 
   console.log('Finding package');
-  process_package(packages, 0, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+  process_package(packages, 0, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
 }
 
-function process_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version) {
+function process_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product) {
   var pkg = packages[pkg_idx];
   var pkg_oid = pkg.pkg_oid;
   var pkg_name = pkg.name;
@@ -172,24 +182,24 @@ function process_package(packages, pkg_idx, package_items, package_calendars, pr
     console.log('Package found: ' + pkg_name);
     if (pkg.is_all_sold_out) {
       console.log('All sold out = TRUE: ' + pkg_name);
-      check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+      check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
     } else {
       if (!package_calendars.available_pkg.includes(pkg_oid)) {
         console.log('No calendar for package, sold out');
-        check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+        check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
       } else {
-        load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, to_date, prod_oid, prod_mid, product_version);
+        load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, to_date, prod_oid, prod_mid, product_version, is_open_date_product);
       }
     }
   } else {
     console.log('Skip package: ' + pkg_name);
-    check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+    check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
   }
 }
 
-function check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version) {
+function check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product) {
   if (packages.length > pkg_idx + 1) {
-    process_package(packages, pkg_idx + 1, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
+    process_package(packages, pkg_idx + 1, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
   } else {
     console.log('Finished processing all packages');
     if (retry_delay >= 0) {
@@ -199,7 +209,7 @@ function check_next_package(packages, pkg_idx, package_items, package_calendars,
   }
 }
 
-function load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, to_date, prod_oid, prod_mid, product_version) {
+function load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, to_date, prod_oid, prod_mid, product_version, is_open_date_product) {
   var pkg = packages[pkg_idx];
   var pkg_oid = pkg.pkg_oid;
   var pkg_item = package_items[pkg.items[0]];
@@ -218,68 +228,86 @@ function load_items_data(packages, pkg_idx, package_items, package_calendars, fr
         console.log('Failed to load item data details: ' + JSON.stringify(res));
       } else {
         console.log('Item data details failed to load, changing end date from ' + to_date + ' to ' + shortened_to_date);
-        load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, shortened_to_date, prod_oid, prod_mid, product_version);
+        load_items_data(packages, pkg_idx, package_items, package_calendars, from_date, shortened_to_date, prod_oid, prod_mid, product_version, is_open_date_product);
       }
     } else {
       console.log('Item data details loaded');
-      process_items_data_response(res, packages, pkg_idx, package_items, package_calendars, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version);
+      process_items_data_response(res, packages, pkg_idx, package_items, package_calendars, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version, is_open_date_product);
     }
   });
 }
 
-function process_items_data_response(res, packages, pkg_idx, package_items, package_calendars, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version) {
+function process_items_data_response(res, packages, pkg_idx, package_items, package_calendars, pkg_item, from_date, to_date, prod_oid, prod_mid, product_version, is_open_date_product) {
   var pkg = packages[pkg_idx];
   var item_data = res.data[pkg_item.item_oid];
   var item = item_data.item;
   var item_data_calendars = item_data.calendar;
   var skus_price_calendars = item_data.skusPriceCalendar;
 
-  console.log('Finding available dates');
-  var available_dates = Object.values(item_data_calendars).filter(cal => cal.is_saleable === true && cal.is_sold_out === false).map(cal => cal.date);
-  console.log('Available dates: ' + available_dates);
-  var matched_dates = date_choices.filter(date_choice => available_dates.includes(date_choice));
-  if (matched_dates.length > 0) {
-    var go_date = matched_dates[0];
-    var calendar = item_data_calendars[go_date];
-    console.log('Date matched: ' + matched_dates);
-    console.log('Date selected: ' + go_date);
-    console.log('Remain quantity of ' + go_date + ': ' + (calendar.remain_qty ? JSON.stringify(calendar.remain_qty) : '--'));
+  var go_date = null;
+  var event_name = null;
+  var calendar = null;
+  if (!is_open_date_product) {
+    var matched_dates = get_matched_dates(item_data_calendars);
+    if (matched_dates.length > 0) {
+      go_date = matched_dates[0];
+      console.log('Date selected: ' + go_date);
+    } else {
+      console.log('No matched available date');
+      check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version, is_open_date_product);
+    }
+  } else {
+    console.log('Open date product, no need to choose date');
+  }
 
-    var event_name = null;
-    if (item.has_event) {
-      var available_events = calendar.events;
-      if (calendar.remain_qty != null) {
-        available_events = Object.entries(calendar.remain_qty).filter(([key, val]) => val > 0).map(([key, val]) => key);
-      }
-      var filtered_events = event_prefs.filter(ev => available_events.includes(ev));
-      if (filtered_events.length > 0) {
-        event_name = filtered_events[0];
-      } else {
-        event_name = item.sale_time.earliest_sale_time.event;
-      }
-      console.log('Event selected: ' + event_name + ' (all events: ' + available_events + ')');
+  if (is_open_date_product || go_date != null) {
+    if (go_date != null && item.has_event) {
+      calendar = item_data_calendars[go_date];
+      console.log('Remain quantity of ' + go_date + ': ' + (calendar.remain_qty ? JSON.stringify(calendar.remain_qty) : '--'));
+      event_name = match_event(calendar, item);
     }
 
-    var orders = resolve_booking_orders(item, go_date, skus_price_calendars, event_name);
+    var orders = resolve_booking_orders(item, go_date, skus_price_calendars, event_name, calendar);
     if (orders.length == 0) {
       console.log('Failed to resolve booking orders');
     } else {
       console.log('Orders to submit: ' + JSON.stringify(orders));
-      //var has_date = (skus_price_calendars != null);
-      var has_date = true;
-      submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid, prod_mid, product_version);
+      submit_order(pkg, item, go_date, event_name, orders, prod_oid, prod_mid, product_version, is_open_date_product);
     }
-  } else {
-    console.log('No matched available date');
-    check_next_package(packages, pkg_idx, package_items, package_calendars, prod_oid, prod_mid, from_date, to_date, product_version);
   }
 }
 
-function resolve_booking_orders(item, go_date, skus_price_calendars, event_name) {
+function get_matched_dates(item_data_calendars) {
+    console.log('Finding available dates');
+    var available_dates = Object.values(item_data_calendars).filter(cal => cal.is_saleable === true && cal.is_sold_out === false).map(cal => cal.date);
+    console.log('Available dates: ' + available_dates);
+    var matched_dates = date_choices.filter(date_choice => available_dates.includes(date_choice));
+    console.log('Date matched: ' + matched_dates);
+    return matched_dates;
+}
+
+function match_event(calendar, item) {
+  var event_name = null;
+  var available_events = calendar.events;
+  if (calendar.remain_qty != null) {
+    available_events = Object.entries(calendar.remain_qty).filter(([key, val]) => val > 0).map(([key, val]) => key);
+  }
+  var filtered_events = event_prefs.filter(ev => available_events.includes(ev));
+  if (filtered_events.length > 0) {
+    event_name = filtered_events[0];
+  } else {
+    event_name = item.sale_time.earliest_sale_time.event;
+  }
+  console.log('Event selected: ' + event_name + ' (all events: ' + available_events + ')');
+  return event_name;
+}
+
+function resolve_booking_orders(item, go_date, skus_price_calendars, event_name, calendar) {
   var orders = [];
   var total_max_qty = item.unit_quantity_rule.total_rule.max_quantity || Number.MAX_SAFE_INTEGER;
   var total_min_qty = item.unit_quantity_rule.total_rule.min_quantity || 0;
   var total_remain_qty = item.remain_qty || Number.MAX_SAFE_INTEGER;
+  var event_remain_qty = calendar && calendar.remain_qty && calendar.remain_qty[event_name] || Number.MAX_SAFE_INTEGER;
 
   var filtered_specs = filter_specs(item);
   console.log('filtered_specs = ' + JSON.stringify(filtered_specs));
@@ -290,7 +318,7 @@ function resolve_booking_orders(item, go_date, skus_price_calendars, event_name)
   filtered_skus.forEach(sku => {
     var price = resolve_price(item, sku, skus_price_calendars, go_date, event_name);
 
-    var resolved_qty = resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty);
+    var resolved_qty = resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty, event_remain_qty);
     accumulated_qty += resolved_qty;
 
     orders.push({
@@ -309,7 +337,7 @@ function resolve_booking_orders(item, go_date, skus_price_calendars, event_name)
   return orders;
 }
 
-function resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty) {
+function resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_remain_qty, event_remain_qty) {
   var spec_min_qty = 0;
   var spec_max_qty = Number.MAX_SAFE_INTEGER;
 
@@ -345,12 +373,15 @@ function resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_r
     wanted_qty = Object.values(quantity_choices).reduce((a,b) => a+b, 0);
   }
 
-  var resolved_qty = Math.max(spec_min_qty, Math.min(spec_max_qty, total_max_qty, total_remain_qty, wanted_qty));
+  var resolved_qty = Math.max(spec_min_qty, Math.min(spec_max_qty, total_max_qty, total_remain_qty, event_remain_qty, wanted_qty));
   if (accumulated_qty + resolved_qty > total_max_qty) {
     resolved_qty = total_max_qty - accumulated_qty;
   }
   if (accumulated_qty + resolved_qty > total_remain_qty) {
     resolved_qty = total_remain_qty - accumulated_qty;
+  }
+  if (accumulated_qty + resolved_qty > event_remain_qty) {
+    resolved_qty = event_remain_qty - accumulated_qty;
   }
   console.log("Quantity " + type + ' => ' +
     'wanted: ' + wanted_qty + 
@@ -358,6 +389,7 @@ function resolve_sku_quantity(sku, item, accumulated_qty, total_max_qty, total_r
     ', max: ' + (spec_max_qty == Number.MAX_SAFE_INTEGER ? '--' : spec_max_qty) + 
     ', total max: ' + (total_max_qty == Number.MAX_SAFE_INTEGER ? '--' : total_max_qty) + 
     ', total remain: ' + (total_remain_qty == Number.MAX_SAFE_INTEGER ? '--' : total_remain_qty) + 
+    ', event remain: ' + (event_remain_qty == Number.MAX_SAFE_INTEGER ? '--' : event_remain_qty) +
     ', before: ' + accumulated_qty +
     ', after: ' + (accumulated_qty + resolved_qty) + 
     ', resolved: ' + resolved_qty);
@@ -384,11 +416,12 @@ function filter_specs(item) {
 
   specs.forEach(spec => {
     var spec_oid = spec.spec_oid;
+    var spec_items = spec.spec_items;
+    var spec_item_oid = null;
     if (spec_oid == 'spec-single') {
-      var spec_item_oid = spec.spec_items[0].spec_item_oid;
+      spec_item_oid = spec.spec_items[0].spec_item_oid;
       selected_specs.push({[spec_oid]: spec_item_oid});
     } else if (spec_oid == 'spec-ticket') {
-      var spec_items = spec.spec_items;
       var has_child = spec_items.filter(spec_item => spec_item.spec_item_oid == 'child').length > 0;
       var has_senior = spec_items.filter(spec_item => spec_item.spec_item_oid == 'senior').length > 0;
       if (!has_senior) {
@@ -402,13 +435,12 @@ function filter_specs(item) {
         console.log('No child, grouping senior to adult: ' + JSON.stringify(quantity_choices));
       }
       spec_items.filter(spec_item => quantity_choices[spec_item.spec_item_oid] && quantity_choices[spec_item.spec_item_oid] > 0).map(spec_item => {
-        var spec_item_oid = spec_item.spec_item_oid;
+        spec_item_oid = spec_item.spec_item_oid;
         selected_specs.push({[spec_oid]: spec_item_oid});
         console.log('Choosing ticket ' + spec_item_oid);
       });
     } else {
       var spec_title = spec.spec_title;
-      var spec_items = spec.spec_items;
       var spec_pref_titles = Object.keys(spec_prefs);
       var selected_spec_item = null;
       if (spec_pref_titles.includes(spec_title)) {
@@ -423,7 +455,7 @@ function filter_specs(item) {
         selected_spec_item = spec_items[0];
         console.log('Choosing first default option for ' + spec_title + '=' + selected_spec_item.name);
       }
-      var spec_item_oid = selected_spec_item.spec_item_oid;
+      spec_item_oid = selected_spec_item.spec_item_oid;
       selected_specs.push({[spec_oid]: spec_item_oid});
     }
   });
@@ -446,7 +478,7 @@ function resolve_price(item, sku, skus_price_calendars, go_date, event_name) {
   }
 }
 
-function submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid, prod_mid, product_version) {
+function submit_order(pkg, item, go_date, event_name, orders, prod_oid, prod_mid, product_version, is_open_date_product) {
   var purchase_url = 'https://www.kkday.com/zh-hk/booking/ajax_direct_purchase';
   var pkg_oid = pkg.pkg_oid;
   var item_oid = item.item_oid;
@@ -456,8 +488,11 @@ function submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid
   var order_skus = [];
   var single_choice_spec = {};
   var multi_choice_spec = {};
-  var generated_id = prod_oid + '_' + item_oid + '_' + go_date;
 
+  var generated_id = prod_oid + '_' + item_oid;
+  if (!is_open_date_product) {
+    generated_id += '_' + go_date;
+  }
   if (item.has_event) {
     generated_id += '_' + event_name;
   }
@@ -483,26 +518,40 @@ function submit_order(pkg, item, has_date, go_date, event_name, orders, prod_oid
   var total_quantity = orders.map(order => order.quantity).reduce((a,b) => a+b, 0);
   var total_price = orders.map(order => order.quantity * order.price).reduce((a,b) => a+b, 0);
 
-  var data = {
-isCartBooking: false,
-isPriorityBooking: false,
-items: [
-  {
+  var data_item = {
     prodOid: prod_oid,
     prodMid: prod_mid,
     productVersion: product_version,
     pkgOid: pkg_oid,
     itemOid: item_oid,
-    isZeroPrice: false,
+    isZeroPrice: false
+  };
+  if (!is_open_date_product) {
+    data_item = {
+      ...data_item,
+      goDate: go_date,
+      backDate: null
+    };
+  }
+  data_item = {
+    ...data_item,
     event: event_name,
     singleChoiceSpecs: isEmpty(single_choice_spec) ? null : single_choice_spec,
     multiChoiceSpecAmount: isEmpty(multi_choice_spec) ? null : multi_choice_spec,
     skus: order_skus,
     amountTotal: total_quantity,
-    priceTotal: total_price,
-    isMarketplace: false,
-    supplierName: null,
-    supplierLogo: null,
+    priceTotal: total_price
+  };
+  if (!is_open_date_product) {
+    data_item = {
+      ...data_item,
+      isMarketplace: false,
+      supplierName: null,
+      supplierLogo: null
+    };
+  }
+  data_item = {
+    ...data_item,
     cancelPolicy: {
       module_title: '取消政策',
       content: {
@@ -533,23 +582,27 @@ items: [
       vertical: 'DEFAULT'
     },
     id: generated_id,
-    isOpenDateProduct: false
-  }
-]
-};
-  if (has_date) {
-    var data_item = data.items[0];
+    isOpenDateProduct: is_open_date_product
+  };
+  if (!is_open_date_product) {
     var confirm_time = pkg.order_process_setting.confirm_time;
     var unit_to_hours = {
       h: 1,
       d: 24
     };
     var confirm_hours = confirm_time == null ? 0 : (unit_to_hours[confirm_time.unit] * confirm_time.value);
-    data_item.confirmHours = confirm_hours;
-    data_item.goDate = go_date;
-    data_item.backDate = null;
+    data_item = {
+      ...data_item,
+      confirmHours: confirm_hours
+    };
   }
-  data[csrf_token_name] = csrf_token;
+
+  var data = {
+    isCartBooking: false,
+    isPriorityBooking: false,
+    items: [ data_item ],
+    csrf_token_name: csrf_token
+  };
 
   log_as_form_data(data);
   if (!mock_submit) {
