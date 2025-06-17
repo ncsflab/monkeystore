@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kkday autofill
 // @namespace    http://www.kkday.com/
-// @version      2024-08-14
+// @version      2025-06-16
 // @description  kkday autofill
 // @author       You
 // @match        https://www.kkday.com/zh-hk/booking/step1/*
@@ -12,7 +12,7 @@
 
 var $ = jQuery.noConflict(true);
 
-var kkdayptsCompleted = false;
+var kkdayptsCompleted = true; // true = not using kkday pts
 var paymentSectionCompleted = false;
 
 function useKKdayPoints() {
@@ -76,11 +76,20 @@ function processTraveler() {
     }
 }
 
+function chooseGender() {
+    var radioGender = $('div.traveler-information div[name=gender0-0] input[type=radio][value=F]');
+    if ($(radioGender).length > 0) {
+        $(radioGender).click();
+        console.log('Selected Gender');
+    }
+}
+
 $(document).ready(function () {
     console.log("Document ready");
-    useKKdayPoints();
+    //useKKdayPoints();
     choosePayment();
     waitContact();
     processTraveler();
+    chooseGender();
     console.log('Document end');
 });
